@@ -1,0 +1,196 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # manual trigger from the Actions tab
+
+# Only one deployment at a time
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+env:
+  APP_DIR: /var/www/express-app
+  APP_NAME: express-app
+
+jobs:
+  build:
+    name: Build Application
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Create deployment package (without node_modules)
+        run: |
+          mkdir -p deploy
+          cp -r dist deploy/
+          cp -r src deploy/
+          cp package.json package-lock.json deploy/
+          cp ecosystem.config.cjs deploy/
+          [ -f .env.example ] && cp .env.example deploy/ || echo "No .env.example found"
+          tar -czf deploy.tar.gz -C deploy .
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-package
+          path: deploy.tar.gz
+          retention-days: 1
+
+  deploy:
+    name: Deploy to EC2
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deployment-package
+
+      - name: Deploy to EC2 via SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -e
+
+          # Write the key file and always remove it at the end
+          printf '%s\n' "$SSH_PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          trap 'rm -f private_key.pem' EXIT
+
+          SSH_OPTS="-i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=20"
+
+          # Copy deployment package to EC2
+          scp $SSH_OPTS deploy.tar.gz ${EC2_USERNAME}@${EC2_HOST}:/tmp/
+
+          # Run the deploy script on EC2 (quoted heredoc: variables expand on the server)
+          ssh $SSH_OPTS ${EC2_USERNAME}@${EC2_HOST} 'bash -s' << 'EOF'
+            set -e
+
+            # Load nvm if Node was installed with nvm (harmless otherwise)
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+            APP_DIR=/var/www/express-app
+            APP_NAME=express-app
+
+            cd "$APP_DIR"
+
+            # Make sure the deploy user owns the app folder
+            sudo chown -R "$USER":"$USER" "$APP_DIR"
+
+            # Backup the current version
+            if [ -d "dist" ]; then
+              timestamp=$(date +%Y%m%d_%H%M%S)
+              mkdir -p backups
+              files="dist package.json package-lock.json ecosystem.config.cjs"
+              [ -f .env ] && files="$files .env"
+              tar -czf "backups/backup_${timestamp}.tar.gz" $files
+              # Keep only the last 5 backups
+              ls -t backups/backup_*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm
+            fi
+
+            # Remove old build output so deleted files don't linger
+            rm -rf dist src
+
+            # Extract the new version
+            echo "Extracting new deployment package..."
+            tar --overwrite -xzf /tmp/deploy.tar.gz -C "$APP_DIR"
+            rm -f /tmp/deploy.tar.gz
+
+            # Install production dependencies
+            # (if ecosystem.config.cjs runs ts-node, remove --omit=dev)
+            echo "Installing production dependencies..."
+            npm ci --omit=dev
+
+            # Create .env on first deploy only
+            if [ ! -f .env ]; then
+              echo "Creating default .env file..."
+              echo "NODE_ENV=production" > .env
+              echo "PORT=8000" >> .env
+            fi
+
+            mkdir -p logs
+
+            # Start the app, or zero-downtime reload if it is already running
+            # (no sudo: PM2 must run as the same user every time)
+            pm2 startOrReload ecosystem.config.cjs --update-env
+            pm2 save
+          EOF
+
+      - name: Verify deployment
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          echo "Waiting for application to start..."
+          sleep 10
+
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i of 5..."
+            response=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://${EC2_HOST}" || echo "000")
+
+            if [ "$response" = "200" ] || [ "$response" = "301" ] || [ "$response" = "302" ]; then
+              echo "Deployment successful! App responded with status: $response"
+              exit 0
+            fi
+
+            echo "Got response: $response, waiting 5 seconds..."
+            sleep 5
+          done
+
+          echo "Deployment verification failed after 5 attempts"
+          echo "Check PM2 logs on the server: pm2 logs express-app"
+          exit 1
+
+      - name: Rollback on failure
+        if: failure()
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          echo "Attempting to roll back to the previous version..."
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          trap 'rm -f private_key.pem' EXIT
+
+          ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=20 \
+            ${EC2_USERNAME}@${EC2_HOST} 'bash -s' << 'EOF'
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+            cd /var/www/express-app
+
+            latest_backup=$(ls -t backups/backup_*.tar.gz 2>/dev/null | head -1)
+
+            if [ -n "$latest_backup" ]; then
+              echo "Found backup: $latest_backup"
+              rm -rf dist
+              tar -xzf "$latest_backup" -C /var/www/express-app
+              npm ci --omit=dev
+              pm2 startOrReload ecosystem.config.cjs --update-env
+              pm2 save
+              echo "Rolled back to previous version"
+            else
+              echo "No backup found, cannot roll back"
+            fi
+          EOF
