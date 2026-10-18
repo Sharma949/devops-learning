@@ -3,7 +3,7 @@ import express, { Request, Response } from "express";
 const app = express();
 
 app.get("/", (_req: Request, res: Response) => {
-  res.json({ status: "ok", message: "hey iam mahi sharma " });
+  res.json({ status: "ok", message: "hey iam mahi sharma and iam a software engineer " });
 });
 
 app.get("/health", (_req: Request, res: Response) => {
