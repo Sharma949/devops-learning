@@ -38,10 +38,4 @@ pm2 start ecosystem.config.cjs   # Run with PM2 (cluster mode)
 - `GET /` — basic status
 - `GET /health` — health check (useful for load balancers / k8s probes)
 - `GET /login` — serves the login page
-- `POST /login` — validates credentials (demo: `admin` / `password123`)
-
-## Demo Credentials
-
-| Username | Password     |
-|----------|--------------|
-| `admin`  | `password123`|
+- `POST /login` — validates credentials against `AUTH_USER` / `AUTH_PASS` env vars

@@ -8,6 +8,8 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         PORT: 8000,
+        AUTH_USER: "admin",
+        AUTH_PASS: "password123",
       },
     },
   ],
