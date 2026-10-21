@@ -3,10 +3,10 @@ import { postLogin } from "../controllers/auth.controller";
 
 const router = Router();
 
-router.get("/login", (_req: Request, res: Response) => {
+router.get("/", (_req: Request, res: Response) => {
   res.sendFile("login.html", { root: "public" });
 });
 
-router.post("/login", postLogin);
+router.post("/", postLogin);
 
 export default router;

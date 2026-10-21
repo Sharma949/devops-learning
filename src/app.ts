@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 app.use(express.static("public"));
 
-app.use("/", authRoutes);
+app.use("/login", authRoutes);
 
 app.get("/", (_req: Request, res: Response) => {
   res.json({ status: "ok", message: "hey iam mahi sharma and iam a software engineer working with Git something new" });

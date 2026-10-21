@@ -9,6 +9,7 @@
     "dev": "ts-node src/index.ts"
   },
   "dependencies": {
+    "dotenv": "^18.0.8",
     "express": "^4.19.2"
   },
   "devDependencies": {
